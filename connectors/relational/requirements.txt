@@ -1,0 +1,10 @@
+# AgentData on-prem connector — minimal deps (HTTP uses the stdlib urllib).
+sqlalchemy>=2.0.0
+certifi>=2024.0.0          # CA bundle for outbound TLS (robust across machines)
+python-dotenv>=1.0.0       # optional: load a local .env
+
+# Database driver — install the one(s) matching your on-prem database:
+psycopg2-binary>=2.9.0     # PostgreSQL
+pymysql>=1.1.0             # MySQL / MariaDB
+# pyodbc>=5.0.0            # SQL Server  (needs a system ODBC driver)
+# oracledb>=2.0.0          # Oracle      (thin mode, no client libs)

@@ -1,0 +1,6 @@
+# Never commit local config or build artifacts — .env holds the connector's AGENT_TOKEN
+# and database URLs, which stay on the customer machine.
+.env
+.venv/
+__pycache__/
+*.pyc
