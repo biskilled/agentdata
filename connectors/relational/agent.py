@@ -118,6 +118,11 @@ def _jsonable(v: Any) -> Any:
         return v.isoformat()
     if isinstance(v, (bytes, bytearray, memoryview)):
         return f"<{len(bytes(v))} bytes>"
+    if isinstance(v, (dict, list)):
+        # JSON/JSONB columns deserialize to dict/list — keep them STRUCTURED so the
+        # job's json.dumps emits real JSON (str(dict) would yield an unparseable
+        # single-quoted Python repr, which corrupts e.g. a flow's `node`).
+        return v
     return str(v)
 
 
