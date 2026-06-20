@@ -269,8 +269,11 @@ class StagingDB:
         with self._engine.begin() as c:
             res = c.execute(text(sql), params or {})
             if fetch and res.returns_rows:
+                cols = list(res.keys())
                 rows = [[_jsonable(v) for v in r] for r in res.fetchall()]
-                return {"rows": rows}
+                # `columns` lets the backend rebuild named dict rows (schedules, flow lists);
+                # older backends ignore it and just read positional `rows`.
+                return {"columns": cols, "rows": rows}
         return {}
 
 
