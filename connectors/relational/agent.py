@@ -332,6 +332,77 @@ def _engine_name(url: str) -> str | None:
     return {"postgresql": "postgres"}.get(backend, backend)
 
 
+# ── dependency preflight ─────────────────────────────────────────────────────
+# (db-dialect → (import name, pip package)). SQLite is stdlib (no driver).
+_DRIVERS = {
+    "postgresql": ("psycopg2", "psycopg2-binary"),
+    "mysql": ("pymysql", "pymysql"),
+    "mariadb": ("pymysql", "pymysql"),
+    "mssql": ("pyodbc", "pyodbc"),
+    "oracle": ("oracledb", "oracledb"),
+    "sqlite": (None, None),
+}
+
+
+def _odbc_hint() -> str:
+    """OS-specific instruction for installing the SQL Server system ODBC driver (pyodbc
+    needs it at runtime — it is NOT a pip package)."""
+    import platform
+    s = platform.system()
+    if s == "Darwin":
+        return "brew install unixodbc msodbcsql18"
+    if s == "Windows":
+        return "Install 'ODBC Driver 18 for SQL Server' from Microsoft (msodbcsql18 / aka.ms/odbc)."
+    return ("Debian/Ubuntu: sudo apt-get install -y unixodbc, then Microsoft's msodbcsql18 "
+            "(packages.microsoft.com).  RHEL/Fedora: sudo dnf install unixODBC msodbcsql18.")
+
+
+def _dialect(url: str) -> str:
+    return (url.split("://", 1)[0].split("+", 1)[0] or "").lower()
+
+
+def preflight(urls: list[tuple[str, str]]) -> list[str]:
+    """For each configured DB URL, verify its Python driver is importable (and, for SQL
+    Server, that a system ODBC driver is present). Returns a list of actionable problems."""
+    problems: list[str] = []
+    for label, url in urls:
+        if not url:
+            continue
+        d = _dialect(url)
+        if d not in _DRIVERS:
+            problems.append(f"{label}: unrecognised database type '{d}' (expected "
+                            f"postgresql / mysql / mssql / oracle / sqlite).")
+            continue
+        # SQL Server is special: pyodbc is pip-installed but ALSO needs a system ODBC
+        # library/driver, so distinguish "driver not pip-installed" from "system ODBC
+        # missing" (importing pyodbc fails on a missing libodbc) — different fixes.
+        if d == "mssql":
+            try:
+                import pyodbc
+            except Exception as e:  # noqa: BLE001
+                m = str(e).lower()
+                if any(t in m for t in ("libodbc", "odbc", "image not found", "library not loaded", "cannot open shared")):
+                    problems.append(f"{label}: SQL Server needs the system ODBC driver "
+                                    f"(pip cannot provide it):\n      {_odbc_hint()}")
+                else:
+                    problems.append(f"{label}: missing the SQL Server Python driver:\n"
+                                    f"      python -m pip install pyodbc\n"
+                                    f"      (it also needs a system ODBC driver: {_odbc_hint()})")
+                continue
+            if not pyodbc.drivers():
+                problems.append(f"{label}: no SQL Server ODBC driver registered. "
+                                f"Install it (pip cannot):\n      {_odbc_hint()}")
+            continue
+        mod, pip_name = _DRIVERS[d]
+        if mod:
+            try:
+                __import__(mod)
+            except Exception:  # noqa: BLE001 — driver not installed
+                problems.append(f"{label}: missing the {d} Python driver. Install it:\n"
+                                f"      python -m pip install {pip_name}")
+    return problems
+
+
 def main() -> int:
     missing = [k for k, v in {
         "AGENTDATA_URL": AGENTDATA_URL, "AGENT_TOKEN": AGENT_TOKEN,
@@ -343,6 +414,16 @@ def main() -> int:
     if not SOURCE_DATABASE_URL and not STAGING_DATABASE_URL:
         print("ERROR: set SOURCE_DATABASE_URL (read sources) and/or STAGING_DATABASE_URL "
               "(write staging) — at least one is required", file=sys.stderr)
+        return 2
+
+    # Dependency preflight — fail early with a clear, OS-specific fix instead of a cryptic
+    # SQLAlchemy "Can't load plugin" / ODBC error when the connector first hits the DB.
+    probs = preflight([("SOURCE_DATABASE_URL", SOURCE_DATABASE_URL),
+                       ("STAGING_DATABASE_URL", STAGING_DATABASE_URL)])
+    if probs:
+        print("ERROR: missing database prerequisites:", file=sys.stderr)
+        for p in probs:
+            print(f"  - {p}", file=sys.stderr)
         return 2
 
     # Line-buffer stdout so log lines appear promptly when piped/redirected

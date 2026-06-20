@@ -1,10 +1,16 @@
-# AgentData on-prem connector — minimal deps (HTTP uses the stdlib urllib).
+# AgentData on-prem connector — dependencies (HTTP uses the stdlib urllib).
 sqlalchemy>=2.0.0
 certifi>=2024.0.0          # CA bundle for outbound TLS (robust across machines)
-python-dotenv>=1.0.0       # optional: load a local .env
+python-dotenv>=1.0.0       # load a local .env
 
-# Database driver — install the one(s) matching your on-prem database:
+# Database drivers — these are pure-pip (wheels on macOS/Windows/Linux, no system
+# packages) so a fresh install supports PostgreSQL, MySQL/MariaDB, Oracle and SQLite
+# out of the box. You only need the one matching your database; installing all is fine.
 psycopg2-binary>=2.9.0     # PostgreSQL
 pymysql>=1.1.0             # MySQL / MariaDB
-# pyodbc>=5.0.0            # SQL Server  (needs a system ODBC driver)
-# oracledb>=2.0.0          # Oracle      (thin mode, no client libs)
+oracledb>=2.0.0            # Oracle (thin mode — no Oracle client libraries needed)
+# SQLite needs no driver (Python standard library).
+#
+# SQL Server (pyodbc) is installed best-effort by the installer because it ALSO needs a
+# system ODBC driver at runtime (msodbcsql18 — pip can't provide it). The connector's
+# startup preflight tells you the exact command for your OS if it's missing.

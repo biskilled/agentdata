@@ -21,11 +21,26 @@ $ok = & $py -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)"; i
   Write-Error "Python 3.10+ required."; exit 1
 }
 
+# A venv hardcodes absolute paths, so a MOVED/renamed connector folder leaves a broken
+# .venv (python/pip point at a path that no longer exists). Detect that and rebuild.
+if (Test-Path .venv) {
+  $venvOk = $false
+  try { & .\.venv\Scripts\python.exe -c "import sys" 2>$null; $venvOk = ($LASTEXITCODE -eq 0) } catch { $venvOk = $false }
+  if (-not $venvOk) {
+    Write-Host "- existing .venv is broken (folder moved?) - rebuilding ..."
+    Remove-Item -Recurse -Force .venv
+  }
+}
 Write-Host "- creating virtual environment (.venv) ..."
 & $py -m venv .venv
 & .\.venv\Scripts\python.exe -m pip install --quiet --upgrade pip
 Write-Host "- installing dependencies ..."
-& .\.venv\Scripts\pip.exe install --quiet -r requirements.txt
+# Use `python -m pip` (not the bare pip wrapper, whose shebang can be stale).
+& .\.venv\Scripts\python.exe -m pip install --quiet -r requirements.txt
+# SQL Server driver: best-effort (also needs a system ODBC driver at runtime, so a failure
+# here must NOT block other databases). The connector's startup preflight prints the fix.
+try { & .\.venv\Scripts\python.exe -m pip install --quiet pyodbc 2>$null } catch {}
+if ($LASTEXITCODE -ne 0) { Write-Host "  - pyodbc not installed - only needed for SQL Server (connector will tell you what to add)" }
 
 if (-not (Test-Path .env)) {
   Copy-Item .env.example .env
