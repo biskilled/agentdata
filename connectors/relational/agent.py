@@ -60,6 +60,7 @@ AGENTDATA_URL = (os.environ.get("AGENTDATA_URL") or "").rstrip("/")
 AGENT_TOKEN = os.environ.get("AGENT_TOKEN") or ""
 SOURCE_DATABASE_URL = os.environ.get("SOURCE_DATABASE_URL") or ""
 STAGING_DATABASE_URL = os.environ.get("STAGING_DATABASE_URL") or ""
+FILES_DIR = os.environ.get("FILES_DIR") or ""   # a local folder this connector can read/write as a file store
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL") or 1.5)
 MAX_ROWS = int(os.environ.get("MAX_ROWS") or 5000)
 HTTP_TIMEOUT = 60
@@ -282,13 +283,69 @@ class StagingDB:
         return {}
 
 
-class Ctx:
-    """Holds the two DB handles a job may need: the read-only source and the
-    write/admin staging DB (created lazily — only if STAGING_DATABASE_URL is set)."""
+class Files:
+    """Read/write/list/delete files under a local folder (FILES_DIR) — so a customer-controlled
+    folder is a flow file store. Paths are relative to the root and traversal-guarded; nothing
+    escapes FILES_DIR."""
 
-    def __init__(self, source: "LocalDB | None", staging: "StagingDB | None") -> None:
+    def __init__(self, root: str) -> None:
+        self.root = os.path.abspath(os.path.expanduser(root))
+        os.makedirs(self.root, exist_ok=True)
+
+    def _abs(self, rel: str) -> str:
+        rel = os.path.normpath((rel or "").lstrip("/"))
+        if rel == ".":
+            rel = ""
+        if rel.startswith("..") or os.path.isabs(rel) or ".." in rel.split(os.sep):
+            raise ValueError("path traversal is not allowed")
+        full = os.path.abspath(os.path.join(self.root, rel))
+        if not (full == self.root or full.startswith(self.root + os.sep)):
+            raise ValueError("path escapes the files root")
+        return full
+
+    def list(self, path: str = "") -> dict:
+        base = self._abs(path)
+        entries = []
+        if os.path.isdir(base):
+            for n in sorted(os.listdir(base)):
+                fp = os.path.join(base, n)
+                isdir = os.path.isdir(fp)
+                entries.append({"name": n, "dir": isdir,
+                                "size": (0 if isdir else os.path.getsize(fp)),
+                                "modified": (None if isdir else __import__("datetime").datetime.utcfromtimestamp(os.path.getmtime(fp)).isoformat())})
+        return {"entries": entries}
+
+    def read(self, path: str) -> dict:
+        with open(self._abs(path), encoding="utf-8") as f:
+            return {"text": f.read()}
+
+    def write(self, path: str, text: str) -> dict:
+        full = self._abs(path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8", newline="") as f:
+            f.write(text or "")
+        return {"ok": True}
+
+    def delete(self, path: str) -> dict:
+        full = self._abs(path)
+        if os.path.isfile(full):
+            os.remove(full)
+        return {"ok": True}
+
+
+class Ctx:
+    """Holds the handles a job may need: the read-only source, the write/admin staging DB,
+    and a local files folder (each created lazily — only if its env var is set)."""
+
+    def __init__(self, source: "LocalDB | None", staging: "StagingDB | None", files: "Files | None" = None) -> None:
         self.source = source
         self.staging = staging
+        self.files = files
+
+    def need_files(self) -> "Files":
+        if self.files is None:
+            raise ValueError("this connector has no FILES_DIR configured — set it in .env to use it as a file store")
+        return self.files
 
     def need_staging(self) -> StagingDB:
         if self.staging is None:
@@ -323,6 +380,11 @@ _HANDLERS = {
     "run_sql": lambda c, p: c.need_source().run_sql(p["sql"], p.get("params") or {}, int(p.get("limit", 1000))),
     # Write path → STAGING_DATABASE_URL (write/admin); backend builds every statement.
     "staging_exec": lambda c, p: c.need_staging().exec(p["sql"], p.get("params") or {}, bool(p.get("fetch"))),
+    # File store → FILES_DIR (a local folder); list/read/write/delete, traversal-guarded.
+    "file_list": lambda c, p: c.need_files().list(p.get("path") or ""),
+    "file_read": lambda c, p: c.need_files().read(p["path"]),
+    "file_write": lambda c, p: c.need_files().write(p["path"], p.get("text") or ""),
+    "file_delete": lambda c, p: c.need_files().delete(p["path"]),
 }
 
 
@@ -416,9 +478,9 @@ def main() -> int:
         print(f"ERROR: missing required env: {', '.join(missing)}", file=sys.stderr)
         print("See connector/.env.example", file=sys.stderr)
         return 2
-    if not SOURCE_DATABASE_URL and not STAGING_DATABASE_URL:
-        print("ERROR: set SOURCE_DATABASE_URL (read sources) and/or STAGING_DATABASE_URL "
-              "(write staging) — at least one is required", file=sys.stderr)
+    if not SOURCE_DATABASE_URL and not STAGING_DATABASE_URL and not FILES_DIR:
+        print("ERROR: set SOURCE_DATABASE_URL (read sources), STAGING_DATABASE_URL (write "
+              "staging), and/or FILES_DIR (file store) — at least one is required", file=sys.stderr)
         return 2
 
     # Dependency preflight — fail early with a clear, OS-specific fix instead of a cryptic
@@ -448,15 +510,16 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             print(f"ERROR: cannot connect to {label}: {e}", file=sys.stderr)
             return 2
-    ctx = Ctx(source, staging)
+    files = Files(FILES_DIR) if FILES_DIR else None
+    ctx = Ctx(source, staging, files)
 
     # Capabilities reported on every poll → the backend records engine + roles so the UI
     # can filter connectors by database type. Staging engine wins (it's what staging uses).
     caps = {
         "engine": _engine_name(STAGING_DATABASE_URL or SOURCE_DATABASE_URL or ""),
-        "roles": ",".join(r for r, h in (("source", source), ("staging", staging)) if h),
+        "roles": ",".join(r for r, h in (("source", source), ("staging", staging), ("files", files)) if h),
     }
-    roles = ", ".join(r for r, h in (("read", source), ("write/staging", staging)) if h)
+    roles = ", ".join(r for r, h in (("read", source), ("write/staging", staging), ("files", files)) if h)
     print(f"connector up · backend={AGENTDATA_URL} · engine={caps['engine']} · "
           f"polling every {POLL_INTERVAL}s · roles: {roles} · raw data stays on-prem")
     while True:
