@@ -35,6 +35,11 @@ Run:  python agent.py     (deps: pip install -r requirements.txt)
 
 from __future__ import annotations
 
+# Connector version — reported to the backend on every poll. Bump when this file changes so
+# the UI can flag connectors running an older build and recommend a re-download. Keep in sync
+# with backend route_agent.LATEST_CONNECTOR_VERSION.
+CONNECTOR_VERSION = "1.1.0"
+
 import json
 import os
 import re
@@ -518,9 +523,10 @@ def main() -> int:
     caps = {
         "engine": _engine_name(STAGING_DATABASE_URL or SOURCE_DATABASE_URL or ""),
         "roles": ",".join(r for r, h in (("source", source), ("staging", staging), ("files", files)) if h),
+        "version": CONNECTOR_VERSION,
     }
     roles = ", ".join(r for r, h in (("read", source), ("write/staging", staging), ("files", files)) if h)
-    print(f"connector up · backend={AGENTDATA_URL} · engine={caps['engine']} · "
+    print(f"connector up · v{CONNECTOR_VERSION} · backend={AGENTDATA_URL} · engine={caps['engine']} · "
           f"polling every {POLL_INTERVAL}s · roles: {roles} · raw data stays on-prem")
     while True:
         try:
